@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Click Annotation</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="main-view">
+  <h1 id="title">Loading…</h1>
+  <div id="wav-index"></div>
+  <p id="message"></p>
+  <table>
+    <tr><th>Segment</th><td id="segment">–</td></tr>
+    <tr><th>Click</th><td id="click">–</td></tr>
+    <tr><th>Mode</th><td id="mode">None</td></tr>
+    <tr><th>Playback</th><td id="playback">Stopped</td></tr>
+  </table>
+  <p id="mapping-prompt"></p>
+  <footer>
+    <button id="map-keys" type="button">Map Keys</button>
+    <button id="refresh-app" type="button">Refresh App</button>
+    <a href="#export">Export</a>
+  </footer>
+</div>
+
+<div id="export-view" hidden>
+  <h1>Export</h1>
+  <textarea id="export-text" readonly></textarea>
+  <p>
+    <button id="clear" type="button">Clear</button>
+    <a href="#">Back</a>
+  </p>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
