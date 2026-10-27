@@ -1,4 +1,4 @@
-const SHELL_CACHE = 'shell-v1';
+const SHELL_CACHE = 'shell-v2';
 const DATA_CACHE = 'data-v1';
 const SHELL = ['./', 'index.html', 'app.js', 'style.css', 'wav_paths.txt'];
 

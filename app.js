@@ -1,8 +1,11 @@
 'use strict';
 
 const STEP = 0.03;
-const SEGMENT_LENGTH = 1.5;
+const SEGMENT_STEP = 0.1;
+const SEGMENT_PRE = 0.3; // default segment start, seconds before the selected click
+const SEGMENT_POST = 0.4; // default segment end, seconds after the selected click
 const TICK_DURATION = 0.01;
+const TICK_DECAY = 0.0015; // time constant of the tick's exponential decay
 const TICK_FREQ = 1000;
 const TICK_FREQ_SELECTED = 4000;
 const TICK_GAIN = 1.0;
@@ -12,7 +15,7 @@ const ACTIONS = [
   { id: 'play', label: 'Play/Stop Selected Segment' },
   { id: 'clickMode', label: 'Click Selection mode (hold)', mode: 'Click Selection' },
   { id: 'wavMode', label: 'Wav Selection mode (hold)', mode: 'Wav Selection' },
-  { id: 'extendMode', label: 'Segment Extension mode (hold)', mode: 'Segment Extension' },
+  { id: 'extendMode', label: 'Segment End Move mode (hold)', mode: 'Segment End Move' },
   { id: 'startMode', label: 'Segment Start Move mode (hold)', mode: 'Segment Start Move' },
   { id: 'forward', label: 'Forward' },
   { id: 'back', label: 'Back' },
@@ -58,8 +61,8 @@ const state = {
   duration: 0,
   clicks: [],
   sel: -1,
-  segStart: 0,
-  segEnd: SEGMENT_LENGTH,
+  segPre: SEGMENT_PRE, // segment bounds relative to the selected click
+  segPost: SEGMENT_POST,
   loadToken: 0,
   heldModes: [], // action ids, most recent last
   mapping: null, // { step, codes: {} } while mapping keys
@@ -68,6 +71,7 @@ const state = {
 
 let audioCtx = null;
 let playback = null; // { nodes: [] }
+let tickBuffers = null; // { normal, selected }
 
 function ctx() {
   if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -77,6 +81,15 @@ function ctx() {
 const clamp = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
 const round = (x) => Math.round(x * 1e6) / 1e6;
 const fmt = (t) => t.toFixed(3) + 's';
+
+// Absolute segment bounds, clipped to the clip's boundaries.
+function segment() {
+  const c = state.sel >= 0 ? state.clicks[state.sel] : state.segPre;
+  return {
+    start: round(clamp(c - state.segPre, 0, state.duration)),
+    end: round(clamp(c + state.segPost, 0, state.duration)),
+  };
+}
 
 // ---------- rendering ----------
 
@@ -88,7 +101,10 @@ function activeMode() {
 function render() {
   $('title').textContent = state.fname || 'Loading…';
   $('wav-index').textContent = state.wavs.length ? `${state.wavIdx + 1} / ${state.wavs.length}` : '';
-  $('segment').textContent = state.buffer ? `${fmt(state.segStart)} – ${fmt(state.segEnd)}` : '–';
+  const seg = segment();
+  $('segment').textContent = state.buffer
+    ? `−${fmt(state.segPre)} / +${fmt(state.segPost)} (${fmt(seg.start)} – ${fmt(seg.end)})`
+    : '–';
   $('click').textContent = state.sel >= 0
     ? `${state.sel + 1} / ${state.clicks.length} @ ${fmt(state.clicks[state.sel])}`
     : (state.buffer ? 'No clicks' : '–');
@@ -157,8 +173,6 @@ async function loadWav(idx) {
     state.duration = buffer.duration;
     state.clicks = clicks;
     state.sel = clicks.length ? 0 : -1;
-    state.segStart = 0;
-    state.segEnd = Math.min(SEGMENT_LENGTH, buffer.duration);
     state.message = '';
   } catch (e) {
     if (token !== state.loadToken) return;
@@ -178,6 +192,25 @@ function parseClicks(text) {
 }
 
 // ---------- playback ----------
+
+// A damped cosine: starts at full amplitude for a sharp attack.
+function makeTick(ac, freq) {
+  const n = Math.round(TICK_DURATION * ac.sampleRate);
+  const buf = ac.createBuffer(1, n, ac.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) {
+    const t = i / ac.sampleRate;
+    data[i] = Math.cos(2 * Math.PI * freq * t) * Math.exp(-t / TICK_DECAY);
+  }
+  return buf;
+}
+
+function ticks(ac) {
+  if (!tickBuffers) {
+    tickBuffers = { normal: makeTick(ac, TICK_FREQ), selected: makeTick(ac, TICK_FREQ_SELECTED) };
+  }
+  return tickBuffers;
+}
 
 function stop() {
   if (!playback) return;
@@ -199,7 +232,8 @@ function togglePlay() {
   if (ac.state === 'suspended') ac.resume();
 
   const t0 = ac.currentTime + 0.05;
-  const { segStart, segEnd } = state;
+  const { start: segStart, end: segEnd } = segment();
+  if (segEnd <= segStart) return;
   const src = ac.createBufferSource();
   src.buffer = state.buffer;
   const audioGain = ac.createGain();
@@ -208,18 +242,17 @@ function togglePlay() {
   src.start(t0, segStart, segEnd - segStart);
   const nodes = [src];
 
+  const tb = ticks(ac);
+  const tickGain = ac.createGain();
+  tickGain.gain.value = TICK_GAIN;
+  tickGain.connect(ac.destination);
   state.clicks.forEach((c, i) => {
     if (c < segStart || c >= segEnd) return;
-    const t = t0 + (c - segStart);
-    const osc = ac.createOscillator();
-    const gain = ac.createGain();
-    osc.frequency.value = i === state.sel ? TICK_FREQ_SELECTED : TICK_FREQ;
-    gain.gain.setValueAtTime(TICK_GAIN, t);
-    gain.gain.linearRampToValueAtTime(0, t + TICK_DURATION);
-    osc.connect(gain).connect(ac.destination);
-    osc.start(t);
-    osc.stop(t + TICK_DURATION);
-    nodes.push(osc);
+    const tick = ac.createBufferSource();
+    tick.buffer = i === state.sel ? tb.selected : tb.normal;
+    tick.connect(tickGain);
+    tick.start(t0 + (c - segStart));
+    nodes.push(tick);
   });
 
   const pb = { nodes };
@@ -256,18 +289,15 @@ function step(dir) {
   }
   if (!state.buffer) return;
 
-  const d = dir * STEP;
   if (mode === 'clickMode') {
     if (state.sel >= 0) state.sel = clamp(state.sel + dir, 0, state.clicks.length - 1);
   } else if (mode === 'extendMode') {
-    const end = round(clamp(state.segEnd + d, 0, state.duration));
-    if (end > state.segStart) state.segEnd = end;
+    // Keep the end after the selected click so it is always heard.
+    state.segPost = round(Math.max(SEGMENT_STEP, state.segPost + dir * SEGMENT_STEP));
   } else if (mode === 'startMode') {
-    const shift = clamp(d, -state.segStart, state.duration - state.segEnd);
-    state.segStart = round(state.segStart + shift);
-    state.segEnd = round(state.segEnd + shift);
+    state.segPre = round(Math.max(0, state.segPre - dir * SEGMENT_STEP));
   } else {
-    moveSelectedClick(d);
+    moveSelectedClick(dir * STEP);
   }
 }
 
