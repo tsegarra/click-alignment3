@@ -6,10 +6,10 @@ const SEGMENT_PRE = 0.3; // default segment start, seconds before the selected c
 const SEGMENT_POST = 0.4; // default segment end, seconds after the selected click
 const TICK_DURATION = 0.01;
 const TICK_DECAY = 0.0015; // time constant of the tick's exponential decay
-const TICK_FREQ = 1000;
+const TICK_FREQS = [1000, 1600]; // non-selected clicks alternate between these
 const TICK_FREQ_SELECTED = 4000;
 const TICK_GAIN = 1.0;
-const AUDIO_GAIN = 0.6;
+const AUDIO_GAIN = 0.35;
 
 const ACTIONS = [
   { id: 'play', label: 'Play/Stop Selected Segment' },
@@ -71,7 +71,7 @@ const state = {
 
 let audioCtx = null;
 let playback = null; // { nodes: [] }
-let tickBuffers = null; // { normal, selected }
+let tickBuffers = null; // { normal: [a, b], selected }
 
 function ctx() {
   if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -207,7 +207,7 @@ function makeTick(ac, freq) {
 
 function ticks(ac) {
   if (!tickBuffers) {
-    tickBuffers = { normal: makeTick(ac, TICK_FREQ), selected: makeTick(ac, TICK_FREQ_SELECTED) };
+    tickBuffers = { normal: TICK_FREQS.map((f) => makeTick(ac, f)), selected: makeTick(ac, TICK_FREQ_SELECTED) };
   }
   return tickBuffers;
 }
@@ -249,7 +249,7 @@ function togglePlay() {
   state.clicks.forEach((c, i) => {
     if (c < segStart || c >= segEnd) return;
     const tick = ac.createBufferSource();
-    tick.buffer = i === state.sel ? tb.selected : tb.normal;
+    tick.buffer = i === state.sel ? tb.selected : tb.normal[i % 2];
     tick.connect(tickGain);
     tick.start(t0 + (c - segStart));
     nodes.push(tick);
