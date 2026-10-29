@@ -10,9 +10,12 @@ const TICK_FREQS = [1000, 1600]; // non-selected clicks alternate between these
 const TICK_FREQ_SELECTED = 4000;
 const TICK_GAIN = 1.0;
 const AUDIO_GAIN = 0.35;
+const VOLUME_STEP_DB = 2; // audio (non-click) volume step
+const VOLUME_MIN_DB = -30;
+const VOLUME_MAX_DB = 12;
 
 const ACTIONS = [
-  { id: 'play', label: 'Play/Stop Selected Segment' },
+  { id: 'play', label: 'Play/Stop Selected Segment (in Click Selection mode: play until release)' },
   { id: 'clickMode', label: 'Click Selection mode (hold)', mode: 'Click Selection' },
   { id: 'wavMode', label: 'Wav Selection mode (hold)', mode: 'Wav Selection' },
   { id: 'extendMode', label: 'Segment End Move mode (hold)', mode: 'Segment End Move' },
@@ -21,7 +24,11 @@ const ACTIONS = [
   { id: 'back', label: 'Back' },
   { id: 'delete', label: 'Delete selected click' },
   { id: 'add', label: 'Add click' },
+  { id: 'volumeUp', label: 'Audio (non-click) volume up' },
+  { id: 'volumeDown', label: 'Audio (non-click) volume down' },
+  { id: 'soloMode', label: 'Solo Selected Click mode (hold)', modifier: true },
 ];
+const REPEATABLE = new Set(['forward', 'back', 'volumeUp', 'volumeDown']);
 const ACTION_BY_ID = Object.fromEntries(ACTIONS.map((a) => [a.id, a]));
 
 const $ = (id) => document.getElementById(id);
@@ -47,6 +54,11 @@ function saveClicks() {
   localStorage.setItem('annotations', JSON.stringify(all));
 }
 
+function getVolumeDb() {
+  const v = Number(localStorage.getItem('audioVolumeDb'));
+  return Number.isFinite(v) ? clamp(v, VOLUME_MIN_DB, VOLUME_MAX_DB) : 0;
+}
+
 function getMappings() {
   return readJSON('keyMappings', null); // { [code]: actionId }
 }
@@ -65,12 +77,15 @@ const state = {
   segPost: SEGMENT_POST,
   loadToken: 0,
   heldModes: [], // action ids, most recent last
+  solo: false, // Solo Selected Click mode held: only the selected click's tick is heard
+  volumeDb: 0, // audio (non-click) volume, relative to AUDIO_GAIN
+  scan: null, // { t0, start } while a Click Selection mode playback is pending release
   mapping: null, // { step, codes: {} } while mapping keys
   message: '',
 };
 
 let audioCtx = null;
-let playback = null; // { nodes: [] }
+let playback = null; // { nodes: [], audioGain, otherTickGain }
 let tickBuffers = null; // { normal: [a, b], selected }
 
 function ctx() {
@@ -108,7 +123,9 @@ function render() {
   $('click').textContent = state.sel >= 0
     ? `${state.sel + 1} / ${state.clicks.length} @ ${fmt(state.clicks[state.sel])}`
     : (state.buffer ? 'No clicks' : '–');
-  $('mode').textContent = activeMode() || 'None';
+  const mode = [activeMode(), state.solo && 'Solo Selected Click'].filter(Boolean).join(' + ');
+  $('mode').textContent = mode || 'None';
+  $('volume').textContent = `${state.volumeDb > 0 ? '+' : ''}${state.volumeDb} dB`;
   $('playback').textContent = playback ? 'Playing' : 'Stopped';
 
   let msg = state.message;
@@ -212,7 +229,25 @@ function ticks(ac) {
   return tickBuffers;
 }
 
+const audioGainValue = () => AUDIO_GAIN * 10 ** (state.volumeDb / 20);
+const otherTickGainValue = () => (state.solo ? 0 : TICK_GAIN);
+
+// Apply volume and solo changes to a playback in progress.
+function updateGains() {
+  if (!playback) return;
+  const now = ctx().currentTime;
+  playback.audioGain.gain.setValueAtTime(audioGainValue(), now);
+  playback.otherTickGain.gain.setValueAtTime(otherTickGainValue(), now);
+}
+
+function changeVolume(dir) {
+  state.volumeDb = clamp(state.volumeDb + dir * VOLUME_STEP_DB, VOLUME_MIN_DB, VOLUME_MAX_DB);
+  localStorage.setItem('audioVolumeDb', String(state.volumeDb));
+  updateGains();
+}
+
 function stop() {
+  state.scan = null;
   if (!playback) return;
   for (const n of playback.nodes) {
     n.onended = null;
@@ -221,7 +256,27 @@ function stop() {
   playback = null;
 }
 
+// Ends a Click Selection mode playback, selecting the most recently played click.
+function endScan() {
+  const scan = state.scan;
+  if (!scan) return;
+  const pos = ctx().currentTime - scan.t0 + scan.start;
+  for (let i = state.clicks.length - 1; i >= 0; i--) {
+    const c = state.clicks[i];
+    if (c <= pos) {
+      if (c >= scan.start) state.sel = i;
+      break;
+    }
+  }
+  stop();
+}
+
 function togglePlay() {
+  if (state.scan) {
+    endScan();
+    render();
+    return;
+  }
   if (playback) {
     stop();
     render();
@@ -232,30 +287,37 @@ function togglePlay() {
   if (ac.state === 'suspended') ac.resume();
 
   const t0 = ac.currentTime + 0.05;
-  const { start: segStart, end: segEnd } = segment();
+  // In Click Selection mode, play from the segment start until the mode is released.
+  const scanning = activeMode() === 'Click Selection';
+  const segStart = segment().start;
+  const segEnd = scanning ? state.duration : segment().end;
   if (segEnd <= segStart) return;
   const src = ac.createBufferSource();
   src.buffer = state.buffer;
   const audioGain = ac.createGain();
-  audioGain.gain.value = AUDIO_GAIN;
+  audioGain.gain.value = audioGainValue();
   src.connect(audioGain).connect(ac.destination);
   src.start(t0, segStart, segEnd - segStart);
   const nodes = [src];
 
   const tb = ticks(ac);
-  const tickGain = ac.createGain();
-  tickGain.gain.value = TICK_GAIN;
-  tickGain.connect(ac.destination);
+  const selTickGain = ac.createGain();
+  selTickGain.gain.value = TICK_GAIN;
+  selTickGain.connect(ac.destination);
+  const otherTickGain = ac.createGain();
+  otherTickGain.gain.value = otherTickGainValue();
+  otherTickGain.connect(ac.destination);
   state.clicks.forEach((c, i) => {
     if (c < segStart || c >= segEnd) return;
     const tick = ac.createBufferSource();
     tick.buffer = i === state.sel ? tb.selected : tb.normal[i % 2];
-    tick.connect(tickGain);
+    tick.connect(i === state.sel ? selTickGain : otherTickGain);
     tick.start(t0 + (c - segStart));
     nodes.push(tick);
   });
 
-  const pb = { nodes };
+  if (scanning) state.scan = { t0, start: segStart };
+  const pb = { nodes, audioGain, otherTickGain };
   src.onended = () => {
     if (playback === pb) {
       playback = null;
@@ -348,9 +410,12 @@ function onKeyDown(e) {
   e.preventDefault();
 
   const action = ACTION_BY_ID[id];
-  if (e.repeat && id !== 'forward' && id !== 'back') return;
+  if (e.repeat && !REPEATABLE.has(id)) return;
 
-  if (action.mode) {
+  if (action.modifier) {
+    state.solo = true;
+    updateGains();
+  } else if (action.mode) {
     state.heldModes = state.heldModes.filter((m) => m !== id);
     state.heldModes.push(id);
   } else if (id === 'play') {
@@ -359,6 +424,10 @@ function onKeyDown(e) {
     step(1);
   } else if (id === 'back') {
     step(-1);
+  } else if (id === 'volumeUp') {
+    changeVolume(1);
+  } else if (id === 'volumeDown') {
+    changeVolume(-1);
   } else if (state.buffer) {
     if (id === 'delete') deleteClick();
     else if (id === 'add') addClick();
@@ -369,10 +438,26 @@ function onKeyDown(e) {
 function onKeyUp(e) {
   const mappings = getMappings();
   const id = mappings && mappings[e.code];
-  if (!id || !ACTION_BY_ID[id].mode) return;
+  if (!id) return;
+  const action = ACTION_BY_ID[id];
+  if (action.modifier) {
+    state.solo = false;
+    updateGains();
+  } else if (action.mode) {
+    state.heldModes = state.heldModes.filter((m) => m !== id);
+    if (id === 'clickMode') endScan();
+  } else {
+    return;
+  }
   e.preventDefault();
-  state.heldModes = state.heldModes.filter((m) => m !== id);
   render();
+}
+
+function releaseAll() {
+  state.heldModes = [];
+  state.solo = false;
+  endScan();
+  updateGains();
 }
 
 // ---------- views ----------
@@ -382,8 +467,8 @@ function showView() {
   $('main-view').hidden = exporting;
   $('export-view').hidden = !exporting;
   if (exporting) {
+    releaseAll();
     stop();
-    state.heldModes = [];
     state.mapping = null;
     $('export-text').value = JSON.stringify(getAnnotations(), null, 2);
   }
@@ -391,10 +476,11 @@ function showView() {
 }
 
 function init() {
+  state.volumeDb = getVolumeDb();
   document.addEventListener('keydown', onKeyDown);
   document.addEventListener('keyup', onKeyUp);
   // Key releases are missed while the page is unfocused.
-  window.addEventListener('blur', () => { state.heldModes = []; render(); });
+  window.addEventListener('blur', () => { releaseAll(); render(); });
   window.addEventListener('hashchange', showView);
 
   $('map-keys').addEventListener('click', (e) => {
