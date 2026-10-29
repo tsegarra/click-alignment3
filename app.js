@@ -1,6 +1,8 @@
 'use strict';
 
-const STEP = 0.03;
+const STEP_DEFAULT_MS = 30; // how far Forward/Back moves the selected click
+const STEP_MIN_MS = 5;
+const STEP_MAX_MS = 50;
 const SEGMENT_STEP = 0.1;
 const SEGMENT_PRE = 0.3; // default segment start, seconds before the selected click
 const SEGMENT_POST = 0.4; // default segment end, seconds after the selected click
@@ -59,6 +61,11 @@ function getVolumeDb() {
   return Number.isFinite(v) ? clamp(v, VOLUME_MIN_DB, VOLUME_MAX_DB) : 0;
 }
 
+function getStepMs() {
+  const v = Number(localStorage.getItem('clickStepMs'));
+  return v && Number.isFinite(v) ? clamp(Math.round(v / 5) * 5, STEP_MIN_MS, STEP_MAX_MS) : STEP_DEFAULT_MS;
+}
+
 function getMappings() {
   return readJSON('keyMappings', null); // { [code]: actionId }
 }
@@ -79,6 +86,7 @@ const state = {
   heldModes: [], // action ids, most recent last
   solo: false, // Solo Selected Click mode held: only the selected click's tick is heard
   volumeDb: 0, // audio (non-click) volume, relative to AUDIO_GAIN
+  stepMs: STEP_DEFAULT_MS, // how far Forward/Back moves the selected click
   scan: null, // { t0, start } while a Click Selection mode playback is pending release
   mapping: null, // { step, codes: {} } while mapping keys
   message: '',
@@ -126,6 +134,7 @@ function render() {
   const mode = [activeMode(), state.solo && 'Solo Selected Click'].filter(Boolean).join(' + ');
   $('mode').textContent = mode || 'None';
   $('volume').textContent = `${state.volumeDb > 0 ? '+' : ''}${state.volumeDb} dB`;
+  $('click-step').textContent = `Click Step: ${state.stepMs} ms`;
   $('playback').textContent = playback ? 'Playing' : 'Stopped';
 
   let msg = state.message;
@@ -359,7 +368,7 @@ function step(dir) {
   } else if (mode === 'startMode') {
     state.segPre = round(Math.max(0, state.segPre - dir * SEGMENT_STEP));
   } else {
-    moveSelectedClick(dir * STEP);
+    moveSelectedClick(dir * state.stepMs / 1000);
   }
 }
 
@@ -477,6 +486,7 @@ function showView() {
 
 function init() {
   state.volumeDb = getVolumeDb();
+  state.stepMs = getStepMs();
   document.addEventListener('keydown', onKeyDown);
   document.addEventListener('keyup', onKeyUp);
   // Key releases are missed while the page is unfocused.
@@ -488,6 +498,20 @@ function init() {
     state.mapping = { step: 0, codes: {}, note: '' };
     render();
   });
+
+  const stepSlider = $('click-step-slider');
+  stepSlider.value = state.stepMs;
+  $('click-step').addEventListener('click', (e) => {
+    e.currentTarget.blur(); // so Space/Enter don't re-trigger the button
+    $('click-step-row').hidden = !$('click-step-row').hidden;
+  });
+  stepSlider.addEventListener('input', () => {
+    state.stepMs = Number(stepSlider.value);
+    localStorage.setItem('clickStepMs', String(state.stepMs));
+    render();
+  });
+  // Return keyboard control to the mapped keys once the slider is released.
+  stepSlider.addEventListener('change', () => stepSlider.blur());
 
   // Drop the cached app shell so the reload fetches the latest files.
   // Cached audio/click files and localStorage are kept.
