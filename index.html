@@ -20,7 +20,11 @@
     <tr><th>Audio volume</th><td id="volume">0 dB</td></tr>
   </table>
   <p id="mapping-prompt"></p>
+  <p id="click-step-row" hidden>
+    <input id="click-step-slider" type="range" min="5" max="50" step="5" aria-label="Click step (ms)">
+  </p>
   <footer>
+    <button id="click-step" type="button">Click Step: 30 ms</button>
     <button id="map-keys" type="button">Map Keys</button>
     <button id="refresh-app" type="button">Refresh App</button>
     <a href="#export">Export</a>
